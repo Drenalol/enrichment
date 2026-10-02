@@ -192,7 +192,7 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
   {
     if (payload.SpecialType != SpecialType.None)
     {
-      diagnostics.Add(new ValidatorDiagnostic("ENR001", [Display(payload), string.Empty]));
+      diagnostics.Add(new ValidatorDiagnostic("ENR001", [DisplayWithAnnotation(payload), string.Empty]));
       return;
     }
 
@@ -215,7 +215,7 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
           continue;
         }
 
-        members.Add(new FlatMember(element.Name, Display(element.Type), accessor));
+        members.Add(new FlatMember(element.Name, DisplayWithAnnotation(element.Type), accessor));
       }
 
       return;
@@ -230,13 +230,13 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
         if (property.IsStatic || property.IsIndexer || property.GetMethod is null || property.DeclaredAccessibility != Accessibility.Public)
           continue;
 
-        members.Add(new FlatMember(property.Name, Display(property.Type), accessorPrefix + property.Name));
+        members.Add(new FlatMember(property.Name, DisplayWithAnnotation(property.Type), accessorPrefix + property.Name));
         expandable = true;
       }
     }
 
     if (!expandable)
-      diagnostics.Add(new ValidatorDiagnostic("ENR001", [Display(payload), string.Empty]));
+      diagnostics.Add(new ValidatorDiagnostic("ENR001", [DisplayWithAnnotation(payload), string.Empty]));
   }
 
   // ─────────────────────────────── Emit ───────────────────────────────
@@ -384,7 +384,7 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
     text.AppendLine("    => _bag.TryGetValue(validator, out var payload) ? payload : throw Missing(validator, \"?\");");
     text.AppendLine();
     text.AppendLine("  private static global::System.Exception Missing(global::System.Type validator, string member)");
-    text.AppendLine("    => new global::System.InvalidOperationException($\"Validator '{validator}' did not provide a payload for Enrichment member '{member}'. It did not run (validation stopped before it), is not registered in DI, or the generated sources are stale and need a rebuild.\");");
+    text.AppendLine("    => new global::System.InvalidOperationException($\"Validator '{validator}' did not provide a payload for Enrichment member '{member}'. It did not run (validation stopped before it), is not registered in DI, returned a null payload, or the generated sources are stale and need a rebuild.\");");
     text.AppendLine("}");
 
     return text.ToString();
@@ -433,6 +433,16 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
 
     return type.ToDisplayString(FullyQualified);
   }
+
+  // Nullable-аннотация ссылочных типов — часть NullableAnnotation, а не имени типа;
+  // для value types «?» это сам Nullable<T>, который уже отображается с вопросиком
+  // (у него аннотация тоже Annotated —append дал бы «??»).
+  // Без этого члена генератор молча стирал Order? в членов Enrichment.
+  private static string DisplayWithAnnotation(ITypeSymbol type) =>
+      type.NullableAnnotation == NullableAnnotation.Annotated
+      && type is not INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T }
+          ? Display(type) + "?"
+          : Display(type);
 
   private static bool IsPublicChain(ISymbol symbol)
   {

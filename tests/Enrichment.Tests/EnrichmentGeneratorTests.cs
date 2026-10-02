@@ -76,7 +76,15 @@ public class EnrichmentGeneratorTests
     ];
   }
 
-  private static (ImmutableArray<Diagnostic> Generator, Diagnostic[] CompilationErrors, IReadOnlyDictionary<string, string> Files) Run(string source, params MetadataReference[] extraReferences)
+  private static (ImmutableArray<Diagnostic> Generator, Diagnostic[] CompilationErrors, IReadOnlyDictionary<string, string> Files) RunProbingWarnings(string source, out string[] warnings, params MetadataReference[] extraReferences)
+  {
+    var r = RunCore(source, extraReferences);
+    warnings = [.. r.Produced.GetDiagnostics().Where(static d => d.Severity == DiagnosticSeverity.Warning && d.Id == "CS8603").Select(static d => d.ToString())];
+
+    return (r.Run.Diagnostics, r.Errors, r.Files);
+  }
+
+  private static (Compilation Produced, Diagnostic[] Errors, IReadOnlyDictionary<string, string> Files, GeneratorDriverRunResult Run) RunCore(string source, params MetadataReference[] extraReferences)
   {
     MetadataReference[] references = [.. BaseReferences().Concat(extraReferences)];
 
@@ -91,9 +99,17 @@ public class EnrichmentGeneratorTests
     var run = driver.GetRunResult();
 
     return (
-        run.Diagnostics,
+        produced,
         [.. produced.GetDiagnostics().Where(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)],
-        run.GeneratedTrees.ToDictionary(static tree => Path.GetFileName(tree.FilePath), static tree => tree.ToString()));
+        run.GeneratedTrees.ToDictionary(static tree => Path.GetFileName(tree.FilePath), static tree => tree.ToString()),
+        run);
+  }
+
+  private static (ImmutableArray<Diagnostic> Generator, Diagnostic[] CompilationErrors, IReadOnlyDictionary<string, string> Files) Run(string source, params MetadataReference[] extraReferences)
+  {
+    var r = RunCore(source, extraReferences);
+
+    return (r.Run.Diagnostics, r.Errors, r.Files);
   }
 
   [Fact]
@@ -361,6 +377,50 @@ public class EnrichmentGeneratorTests
     Assert.Empty(errors);
     Assert.Contains("typeof(global::ReferenceOrderValidator)", files["RequestOneHandler.Handler.g.cs"]);
     Assert.Contains("public global::Order Order =>", files["RequestOneHandler.RequestOneEnrichment.g.cs"]);
+  }
+
+  [Fact]
+  public void NullablePayloadElements_PreserveNullability_AndNullPayloadThrows()
+  {
+    var source = "#nullable enable\n" + Model + """
+
+      public class NullablePayloadValidator : EnrichingValidator<RequestOne, (Order? Order, decimal? Optional, string Required)>
+      {
+          protected override ValueTask<(Order?, decimal?, string)> EnrichAsync(RequestOne request, CancellationToken cancellationToken)
+              => throw new System.NotImplementedException();
+      }
+
+      public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
+      {
+          public RequestOneHandler(IEnumerable<IEnrichingValidator<RequestOne>> requestValidators, IEnumerable<IEnrichingValidator<ResponseOne>> responseValidators) : base(requestValidators, responseValidators)
+          {
+          }
+
+          protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
+          {
+              var order = Enrichment.Order;
+              var optional = Enrichment.Optional;
+              return Task.FromResult(new ResponseOne());
+          }
+      }
+      """;
+
+    var (_, errors, files) = RunProbingWarnings(source, out var cs8603);
+
+    Assert.Empty(errors);
+    Assert.Empty(cs8603);
+
+    var context = files["RequestOneHandler.RequestOneEnrichment.g.cs"];
+
+    // ссылочная nullable-аннотация сохранена как Member-тип
+    Assert.Contains("public global::Order? Order =>", context);
+
+    // Nullable<decimal> — сам тип, двойного «?» быть не должно
+    Assert.Contains("public decimal? Optional =>", context);
+    Assert.DoesNotContain("decimal?? ", context);
+
+    // null payload (Get вернёт null, type-pattern провалится) — fail-fast с честным текстом
+    Assert.Contains("returned a null payload", context);
   }
 
   [Fact]
