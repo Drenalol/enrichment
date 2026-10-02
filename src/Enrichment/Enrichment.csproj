@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <PackageId>Enrichment</PackageId>
+    <Description>Data loaded by FluentValidation validators during validation is reused by MediatR handlers through a generated strongly-typed Enrichment context. Ships the runtime contracts and the Roslyn source generator in one package.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FluentValidation" Version="12.1.1" />
+    <PackageReference Include="MediatR" Version="12.4.1" />
+    <!-- AddEnrichmentValidators: assembly-scanning регистрация валидаторов -->
+    <PackageReference Include="Scrutor" Version="6.1.0" />
+  </ItemGroup>
+
+  <!-- Source generator упаковывается в analyzers/dotnet/cs того же пакета:
+       потребителю достаточно Install-Package Enrichment. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Enrichment.Generator\Enrichment.Generator.csproj" PrivateAssets="all" ReferenceOutputAssembly="false" />
+    <None Include="..\Enrichment.Generator\bin\$(Configuration)\netstandard2.0\Enrichment.Generator.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+</Project>

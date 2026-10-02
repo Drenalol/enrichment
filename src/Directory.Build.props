@@ -1,0 +1,16 @@
+<Project>
+
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <Authors>Enrichment contributors</Authors>
+    <Copyright>Copyright (c) 2026 Enrichment contributors</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageTags>source-generator;roslyn;codegen;mediatr;fluentvalidation;validation</PackageTags>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!-- remote ещё нет: авто-detach пустого <repository> в nuspec ломает валидацию nuget.org;
+         при появлении публичного репо включить и задать RepositoryUrl -->
+    <EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Enrichment.Generator/Enrichment.Generator.csproj" />
+    <Project Path="src/Enrichment/Enrichment.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Enrichment.Tests/Enrichment.Tests.csproj" />
+  </Folder>
+  <Folder Name="/examples/">
+    <Project Path="examples/Enrichment.Example/Enrichment.Example.csproj" />
+  </Folder>
+</Solution>
