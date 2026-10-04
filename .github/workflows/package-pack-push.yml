@@ -9,11 +9,15 @@ permissions:
   packages: write
 
 env:
-  NUGET_AUTH_TOKEN: ${{ secrets.NUGET_AUTH_TOKEN }}
+  NUGET_USER: ${{ secrets.NUGET_USER }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
 
     steps:
     - uses: actions/checkout@v4
@@ -29,8 +33,12 @@ jobs:
       run: |
         dotnet nuget add source --username "$GITHUB_ACTOR" --password "$GITHUB_TOKEN" --store-password-in-clear-text --name github "https://nuget.pkg.github.com/Drenalol/index.json"
         dotnet nuget push "./packages/*.nupkg" --source github --skip-duplicate
+    - name: NuGet login (OIDC -> temp API key)
+      if: env.NUGET_USER != ''
+      uses: NuGet/login@v1
+      id: login
+      with:
+        user: ${{ secrets.NUGET_USER }}
     - name: Publish NuGet
-      if: env.NUGET_AUTH_TOKEN != ''
-      env:
-        NUGET_AUTH_TOKEN: ${{secrets.NUGET_AUTH_TOKEN}}
-      run: dotnet nuget push -s https://www.nuget.org/api/v2/package -k $NUGET_AUTH_TOKEN ./packages/*.nupkg --skip-duplicate
+      if: env.NUGET_USER != ''
+      run: dotnet nuget push "./packages/*.nupkg" --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
