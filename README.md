@@ -23,7 +23,7 @@ A FluentValidation rule that checks an order usually needs that order fetched fr
 ## Getting started
 
 ```
-dotnet add package Enrichment
+dotnet add package Drenalol.Enrichment
 ```
 
 The package ships the runtime contracts **and** the source generator; referencing one package is enough.
@@ -206,7 +206,7 @@ A runnable console demo lives in [`examples/Enrichment.Example`](examples/Enrich
 ## Repository layout
 
 ```
-src/Enrichment             runtime contracts + AddEnrichment (packaged as Enrichment)
+src/Enrichment             runtime contracts + AddEnrichment (packaged as Drenalol.Enrichment)
 src/Enrichment.Generator   the Roslyn source generator (packed into the Enrichment package)
 tests/Enrichment.Tests     generator tests driven through CSharpGeneratorDriver
 examples/Enrichment.Example console demo

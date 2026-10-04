@@ -4,7 +4,8 @@
     <TargetFramework>net8.0</TargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
-    <PackageId>Enrichment</PackageId>
+    <!-- ID «Enrichment» на nuget.org занят чужим пакетом (Geekiam, 2023) — префикс аккаунта -->
+    <PackageId>Drenalol.Enrichment</PackageId>
     <Description>Data enrichers load is reused by FluentValidation contextual validators and MediatR handlers through a generated strongly-typed Enrichment context. Ships the runtime contracts and the Roslyn source generator in one package.</Description>
   </PropertyGroup>
 
@@ -16,7 +17,7 @@
   </ItemGroup>
 
   <!-- Source generator упаковывается в analyzers/dotnet/cs того же пакета:
-       потребителю достаточно Install-Package Enrichment. -->
+       потребителю достаточно Install-Package Drenalol.Enrichment. -->
   <ItemGroup>
     <ProjectReference Include="..\Enrichment.Generator\Enrichment.Generator.csproj" PrivateAssets="all" ReferenceOutputAssembly="false" />
     <None Include="..\Enrichment.Generator\bin\$(Configuration)\netstandard2.0\Enrichment.Generator.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
