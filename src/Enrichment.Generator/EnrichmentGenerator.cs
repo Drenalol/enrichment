@@ -11,10 +11,14 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 namespace Enrichment.Generator;
 
 /// <summary>
-/// Плоский Enrichment хендлера строится из payload'ов всех валидаторов:
+/// Плоский Enrichment хендлера строится из payload'ов всех энричеров слоя данных:
 /// хендлер объявляет только base EnrichedHandler&lt;TRequest, TResponse&gt; (и partial),
-/// валидаторы — только IEnrichingValidator&lt;TRequest, TData&gt;; атрибуты не нужны.
+/// энричеры — IDataEnricher&lt;TRequest, TData&gt;; атрибуты не требуются
+/// (опциональный [EnrichmentContext] лишь перебивает имя контекста стороны).
 /// TData разворачивается: именованный кортеж — по элементам, класс/record — по публичным свойствам.
+/// Генерируемый контекст реализует сгенерированный же интерфейс-витрину I{Context},
+/// который контекстные валидаторы и указывают как TNeeds; рукописные needs-интерфейсы
+/// (разрешившийся на скане TNeeds) — ошибка ENR006.
 /// </summary>
 [Generator(LanguageNames.CSharp)]
 public sealed class EnrichmentGenerator : IIncrementalGenerator
@@ -22,12 +26,14 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
   private const string RuntimeNamespace = "Enrichment";
   private const string HandlerSimpleName = "EnrichedHandler";
   private const string ValidatorSimpleName = "IEnrichingValidator";
+  private const string EnricherSimpleName = "IDataEnricher";
+  private const string ContextAttributeSimpleName = "EnrichmentContextAttribute";
 
   private static readonly SymbolDisplayFormat FullyQualified = SymbolDisplayFormat.FullyQualifiedFormat;
 
   /// <summary>
   /// Строит инкрементальный пайплайн: провайдер хендлеров (по base-списку <c>EnrichedHandler&lt;,&gt;</c>),
-  /// единый скан сборки на реализацию <c>IEnrichingValidator&lt;,&gt;</c> и эмит
+  /// единый скан сборки на <c>IDataEnricher&lt;,&gt;</c> и <c>IEnrichingValidator&lt;,&gt;</c> и эмит
   /// <c>*Enrichment.g.cs</c> / <c>*ResponseEnrichment.g.cs</c> / <c>*.Handler.g.cs</c> на каждый хендлер.
   /// </summary>
   public void Initialize(IncrementalGeneratorInitializationContext context)
@@ -38,12 +44,14 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
         .Select(static (handler, _) => handler!)
         .Collect();
 
-    var validators = context.CompilationProvider.Select(GetValidators);
+    var scan = context.CompilationProvider.Select(GetScan);
 
-    context.RegisterSourceOutput(handlers.Combine(validators), static (production, pair) =>
+    context.RegisterSourceOutput(handlers.Combine(scan), static (production, pair) =>
     {
+      var claimed = new Dictionary<(string? Namespace, string Name), string>();
+
       foreach (var handler in pair.Item1)
-        EmitHandler(production, handler, pair.Item2);
+        EmitHandler(production, handler, pair.Item2, claimed);
     });
   }
 
@@ -95,20 +103,59 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
 
     outerTypes.Reverse();
 
+    var (requestContextName, responseContextName) = GetContextNameOverrides(symbol);
+
     return new HandlerInfo(
         symbol.ContainingNamespace.IsGlobalNamespace ? null : symbol.ContainingNamespace.ToDisplayString(),
         symbol.Name,
         AccessibilityKeyword(symbol.DeclaredAccessibility),
         outerTypes.ToImmutable(),
         typeArguments[0].ToDisplayString(FullyQualified),
-        typeArguments[1].ToDisplayString(FullyQualified));
+        typeArguments[1].ToDisplayString(FullyQualified),
+        requestContextName,
+        responseContextName);
   }
 
-  // ──────────────────────────── Validators ────────────────────────────
-
-  private static ImmutableArray<ValidatorInfo> GetValidators(Compilation compilation, CancellationToken cancellationToken)
+  // [EnrichmentContext(Request = "...", Response = "...")] — опциональное переименование
+  // контекста стороны; в HandlerInfo уходят просто строки, поэтому incremental-кэш корректен.
+  private static (string? Request, string? Response) GetContextNameOverrides(INamedTypeSymbol handler)
   {
-    var builder = ImmutableArray.CreateBuilder<ValidatorInfo>();
+    foreach (var attribute in handler.GetAttributes())
+    {
+      if (attribute.AttributeClass is not { Name: ContextAttributeSimpleName } attributeClass
+          || attributeClass.ContainingNamespace?.ToDisplayString() != RuntimeNamespace)
+        continue;
+
+      string? request = null;
+      string? response = null;
+
+      foreach (var argument in attribute.NamedArguments)
+      {
+        switch (argument.Key)
+        {
+          case "Request":
+            request = argument.Value.Value as string;
+            break;
+          case "Response":
+            response = argument.Value.Value as string;
+            break;
+        }
+      }
+
+      return (
+        string.IsNullOrWhiteSpace(request) ? null : request,
+        string.IsNullOrWhiteSpace(response) ? null : response);
+    }
+
+    return (null, null);
+  }
+
+  // ─────────────────── Enrichers (данные) и Validators (правила) ───────────────────
+
+  private static ScanResult GetScan(Compilation compilation, CancellationToken cancellationToken)
+  {
+    var enrichers = ImmutableArray.CreateBuilder<EnricherInfo>();
+    var validators = ImmutableArray.CreateBuilder<ValidatorInfo>();
 
     foreach (var assembly in GetAssemblies(compilation))
     {
@@ -127,11 +174,64 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
         if (type.ContainingNamespace?.ToDisplayString() == RuntimeNamespace)
           continue;
 
-        CollectValidator(type, builder);
+        CollectEnricher(type, enrichers);
+        CollectValidator(type, validators);
       }
     }
 
-    return builder.ToImmutable();
+    return new ScanResult(enrichers.ToImmutable(), validators.ToImmutable());
+  }
+
+  private static void CollectEnricher(INamedTypeSymbol type, ImmutableArray<EnricherInfo>.Builder builder)
+  {
+    INamedTypeSymbol[] enricherInterfaces =
+    [
+      .. type.AllInterfaces
+          .Where(static i => i.OriginalDefinition is { Name: EnricherSimpleName } original
+                             && original.ContainingNamespace?.ToDisplayString() == RuntimeNamespace),
+    ];
+
+    if (enricherInterfaces.Length == 0)
+      return;
+
+    var enricherTypeFq = type.ToDisplayString(FullyQualified);
+    var isAccessible = IsPublicChain(type);
+
+    var payloadInterfaces = enricherInterfaces.Where(static i => i.TypeArguments.Length == 2).ToLookup(static i => i.TypeArguments[0].ToDisplayString(FullyQualified));
+
+    foreach (var group in payloadInterfaces)
+    {
+      var diagnostics = ImmutableArray.CreateBuilder<ValidatorDiagnostic>();
+
+      if (group.Count() > 1)
+      {
+        builder.Add(new EnricherInfo(
+            enricherTypeFq,
+            group.Key,
+            isAccessible,
+            null,
+            ImmutableArray<FlatMember>.Empty,
+            ImmutableArray.Create(new ValidatorDiagnostic("ENR004", [enricherTypeFq, group.Key]))));
+        continue;
+      }
+
+      var payload = group.Single().TypeArguments[1];
+      var members = ImmutableArray.CreateBuilder<FlatMember>();
+      var payloadDisplay = Display(payload);
+
+      ExpandPayload(payload, string.Empty, members, diagnostics);
+
+      if (diagnostics.Count > 0)
+      {
+        builder.Add(new EnricherInfo(enricherTypeFq, group.Key, isAccessible, null, ImmutableArray<FlatMember>.Empty, diagnostics.ToImmutable()));
+        continue;
+      }
+
+      builder.Add(new EnricherInfo(enricherTypeFq, group.Key, isAccessible, payloadDisplay, members.ToImmutable(), ImmutableArray<ValidatorDiagnostic>.Empty));
+    }
+
+    if (payloadInterfaces.Count == 0 && enricherInterfaces.Any(static i => i.TypeArguments.Length == 1))
+      builder.Add(new EnricherInfo(enricherTypeFq, enricherInterfaces.First(static i => i.TypeArguments.Length == 1).TypeArguments[0].ToDisplayString(FullyQualified), isAccessible, null, ImmutableArray<FlatMember>.Empty, ImmutableArray<ValidatorDiagnostic>.Empty));
   }
 
   private static void CollectValidator(INamedTypeSymbol type, ImmutableArray<ValidatorInfo>.Builder builder)
@@ -149,41 +249,38 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
     var validatorTypeFq = type.ToDisplayString(FullyQualified);
     var isAccessible = IsPublicChain(type);
 
-    var payloadInterfaces = validatorInterfaces.Where(static i => i.TypeArguments.Length == 2).ToLookup(static i => i.TypeArguments[0].ToDisplayString(FullyQualified));
+    var contextualInterfaces = validatorInterfaces.Where(static i => i.TypeArguments.Length == 2).ToLookup(static i => i.TypeArguments[0].ToDisplayString(FullyQualified));
 
-    foreach (var group in payloadInterfaces)
+    var contextualKeys = new HashSet<string>(StringComparer.Ordinal);
+
+    foreach (var group in contextualInterfaces)
     {
       var diagnostics = ImmutableArray.CreateBuilder<ValidatorDiagnostic>();
+      var seen = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
 
-      if (group.Count() > 1)
+      foreach (var validatorInterface in group)
       {
-        builder.Add(new ValidatorInfo(
-            validatorTypeFq,
-            group.Key,
-            isAccessible,
-            null,
-            ImmutableArray<FlatMember>.Empty,
-            ImmutableArray.Create(new ValidatorDiagnostic("ENR004", [validatorTypeFq, group.Key]))));
-        continue;
+        if (!seen.Add(validatorInterface))
+          continue;
+
+        var needsType = validatorInterface.TypeArguments[1];
+
+        // needs — это I{Context}Enrichment, который эмитит этот же генератор: на входе скана
+        // он ещё не существует (IErrorTypeSymbol) — это корректная ссылка, её проверит
+        // пользовательская компиляция. Разрешившийся тип = рукописная needs — больше не поддерживается.
+        if (needsType is not IErrorTypeSymbol)
+          diagnostics.Add(new ValidatorDiagnostic("ENR006", [validatorTypeFq, needsType.ToDisplayString(FullyQualified), group.Key]));
       }
 
-      var payload = group.Single().TypeArguments[1];
-      var members = ImmutableArray.CreateBuilder<FlatMember>();
-      var payloadDisplay = Display(payload);
-
-      ExpandPayload(payload, string.Empty, members, diagnostics);
-
-      if (diagnostics.Count > 0)
-      {
-        builder.Add(new ValidatorInfo(validatorTypeFq, group.Key, isAccessible, null, ImmutableArray<FlatMember>.Empty, diagnostics.ToImmutable()));
-        continue;
-      }
-
-      builder.Add(new ValidatorInfo(validatorTypeFq, group.Key, isAccessible, payloadDisplay, members.ToImmutable(), ImmutableArray<ValidatorDiagnostic>.Empty));
+      contextualKeys.Add(group.Key);
+      builder.Add(new ValidatorInfo(validatorTypeFq, group.Key, isAccessible, true, diagnostics.ToImmutable()));
     }
 
-    if (payloadInterfaces.Count == 0 && validatorInterfaces.Any(static i => i.TypeArguments.Length == 1))
-      builder.Add(new ValidatorInfo(validatorTypeFq, validatorInterfaces.First(static i => i.TypeArguments.Length == 1).TypeArguments[0].ToDisplayString(FullyQualified), isAccessible, null, ImmutableArray<FlatMember>.Empty, ImmutableArray<ValidatorDiagnostic>.Empty));
+    // чистые ключи запросов: только guard-массив (контекстные валидаторы на авто-union
+    // попадают сюда же, если Roslyn отбросил 2-арный интерфейс с неразрешённым needs)
+    foreach (var key in validatorInterfaces.Where(static i => i.TypeArguments.Length == 1).Select(static i => i.TypeArguments[0].ToDisplayString(FullyQualified)).Distinct(StringComparer.Ordinal))
+      if (!contextualKeys.Contains(key))
+        builder.Add(new ValidatorInfo(validatorTypeFq, key, isAccessible, false, ImmutableArray<ValidatorDiagnostic>.Empty));
   }
 
   // TData -> плоские члены контекста: кортеж по элементам (вложенные — рекурсивно, доступ ItemN.ItemM),
@@ -241,37 +338,106 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
 
   // ─────────────────────────────── Emit ───────────────────────────────
 
-  private static void EmitHandler(SourceProductionContext production, HandlerInfo handler, ImmutableArray<ValidatorInfo> validators)
+  private static void EmitHandler(
+    SourceProductionContext production,
+    HandlerInfo handler,
+    ScanResult scan,
+    Dictionary<(string? Namespace, string Name), string> claimed)
   {
-    var requestSide = ResolveSide(production, handler, validators, handler.RequestKey);
-    var responseSide = ResolveSide(production, handler, validators, handler.ResponseKey);
+    var requestSide = ResolveSide(production, handler, scan, handler.RequestKey);
+    var responseSide = ResolveSide(production, handler, scan, handler.ResponseKey);
 
-    if (requestSide.Validators.Count == 0 && responseSide.Validators.Count == 0)
+    if (IsEmpty(requestSide) && IsEmpty(responseSide))
       return;
 
-    var requestContext = ContextName(handler.Name, string.Empty);
-    var responseContext = ContextName(handler.Name, "Response");
+    var requestContext = handler.RequestContextName ?? ContextName(handler.Name, string.Empty);
+    var responseContext = handler.ResponseContextName ?? ContextName(handler.Name, "Response");
 
-    production.AddSource($"{handler.Name}.{requestContext}.g.cs", ContextText(handler.Namespace, requestContext, requestSide));
-    production.AddSource($"{handler.Name}.{responseContext}.g.cs", ContextText(handler.Namespace, responseContext, responseSide));
+    if (HasContext(requestSide) && ClaimContextName(production, claimed, handler, requestContext))
+      production.AddSource($"{handler.Name}.{requestContext}.g.cs", ContextText(handler.Namespace, requestContext, requestSide));
+
+    if (HasContext(responseSide) && ClaimContextName(production, claimed, handler, responseContext))
+      production.AddSource($"{handler.Name}.{responseContext}.g.cs", ContextText(handler.Namespace, responseContext, responseSide));
+
     production.AddSource($"{handler.Name}.Handler.g.cs", HandlerText(handler, requestContext, requestSide, responseContext, responseSide));
   }
 
-  private sealed record SideMember(FlatMember Member, string ValidatorExpression, string PayloadDisplay);
+  // Имена контекстов уникальны в namespace: [EnrichmentContext] может столкнуть
+  // request/response стороны одного хендлера или два хендлера — ловим до компиляции generated-кода.
+  private static bool ClaimContextName(
+    SourceProductionContext production,
+    Dictionary<(string? Namespace, string Name), string> claimed,
+    HandlerInfo handler,
+    string contextName)
+  {
+    var key = (handler.Namespace, contextName);
+
+    if (claimed.TryGetValue(key, out var owner))
+    {
+      production.ReportDiagnostic(Diagnostic.Create(Diagnostics.DuplicateContextName, Location.None, contextName, owner, handler.Name));
+      return false;
+    }
+
+    claimed[key] = handler.Name;
+    return true;
+  }
+
+  private sealed record SideMember(FlatMember Member, string EnricherExpression, string PayloadDisplay);
 
   private sealed class Side
   {
     public List<SideMember> Members = [];
-    public readonly List<string> Validators = []; // typeof(...) выражения, включая None-валидаторы
+    public readonly List<string> Enrichers = []; // typeof(...) выражения, включая payload-less энричеры
+    public readonly List<string> Validators = []; // typeof(...) выражения: чистые и контекстные
   }
 
-  private static Side ResolveSide(SourceProductionContext production, HandlerInfo handler, ImmutableArray<ValidatorInfo> validators, string key)
+  private static bool IsEmpty(Side side) => side.Enrichers.Count == 0 && side.Validators.Count == 0;
+
+  private static bool HasContext(Side side) => side.Members.Count > 0;
+
+  private static Side ResolveSide(SourceProductionContext production, HandlerInfo handler, ScanResult scan, string key)
   {
     var side = new Side();
     var ownerByName = new Dictionary<string, string>(StringComparer.Ordinal);
     var duplicated = new HashSet<string>(StringComparer.Ordinal);
 
-    foreach (var validator in validators)
+    foreach (var enricher in scan.Enrichers)
+    {
+      if (enricher.RequestKey != key)
+        continue;
+
+      foreach (var diagnostic in enricher.Diagnostics)
+        production.ReportDiagnostic(Diagnostic.Create(Descriptor(diagnostic.Id), Location.None, [.. diagnostic.Args.Cast<object?>()]));
+
+      if (!enricher.IsAccessible)
+      {
+        production.ReportDiagnostic(Diagnostic.Create(Diagnostics.ValidatorNotAccessible, Location.None, enricher.EnricherTypeFq, $"{handler.Accessibility} {handler.Name}"));
+        continue;
+      }
+
+      var enricherExpression = $"typeof({enricher.EnricherTypeFq})";
+      side.Enrichers.Add(enricherExpression);
+
+      if (enricher.PayloadDisplay is null)
+        continue;
+
+      foreach (var member in enricher.Members)
+      {
+        if (ownerByName.TryGetValue(member.Name, out var owner))
+        {
+          duplicated.Add(member.Name);
+          production.ReportDiagnostic(Diagnostic.Create(Diagnostics.DuplicateEnrichmentMember, Location.None, member.Name, owner + " and " + enricher.EnricherTypeFq));
+          continue;
+        }
+
+        ownerByName[member.Name] = enricher.EnricherTypeFq;
+        side.Members.Add(new SideMember(member, enricherExpression, enricher.PayloadDisplay));
+      }
+    }
+
+    side.Members = [.. side.Members.Where(sideMember => !duplicated.Contains(sideMember.Member.Name))];
+
+    foreach (var validator in scan.Validators)
     {
       if (validator.RequestKey != key)
         continue;
@@ -285,27 +451,9 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
         continue;
       }
 
-      var validatorExpression = $"typeof({validator.ValidatorTypeFq})";
-      side.Validators.Add(validatorExpression);
-
-      if (validator.PayloadDisplay is null)
-        continue;
-
-      foreach (var member in validator.Members)
-      {
-        if (ownerByName.TryGetValue(member.Name, out var owner))
-        {
-          duplicated.Add(member.Name);
-          production.ReportDiagnostic(Diagnostic.Create(Diagnostics.DuplicateEnrichmentMember, Location.None, member.Name, owner + " and " + validator.ValidatorTypeFq));
-          continue;
-        }
-
-        ownerByName[member.Name] = validator.ValidatorTypeFq;
-        side.Members.Add(new SideMember(member, validatorExpression, validator.PayloadDisplay));
-      }
+      side.Validators.Add($"typeof({validator.ValidatorTypeFq})");
     }
 
-    side.Members = [.. side.Members.Where(sideMember => !duplicated.Contains(sideMember.Member.Name))];
     return side;
   }
 
@@ -314,6 +462,7 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
     "ENR001" => Diagnostics.PayloadNotExpandable,
     "ENR002" => Diagnostics.DuplicateEnrichmentMember,
     "ENR004" => Diagnostics.ConflictingPayloads,
+    "ENR006" => Diagnostics.NeedsTypeMustBeGenerated,
     _ => Diagnostics.ValidatorNotAccessible,
   };
 
@@ -325,8 +474,8 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
     var text = new StringBuilder();
     Open(text, handler);
 
-    AppendContextProperty(text, handler, requestContext, requestSide, "RequestBag", "Enrichment", "Request");
-    AppendContextProperty(text, handler, responseContext, responseSide, "ResponseBag", "ResponseEnrichment", "Response");
+    AppendSide(text, handler, requestContext, requestSide, "RequestBag", "Enrichment", "Request");
+    AppendSide(text, handler, responseContext, responseSide, "ResponseBag", "ResponseEnrichment", "Response");
 
     text.AppendLine("}");
 
@@ -336,17 +485,26 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
     return text.ToString();
   }
 
-  private static void AppendContextProperty(StringBuilder text, HandlerInfo handler, string contextName, Side side, string bagField, string propertyName, string typesProperty)
+  private static void AppendSide(StringBuilder text, HandlerInfo handler, string contextName, Side side, string bagField, string propertyName, string sideWord)
   {
-    var qualified = handler.Namespace is null ? contextName : $"global::{handler.Namespace}.{contextName}";
-
-    if (side.Validators.Count == 0)
+    if (IsEmpty(side))
       return;
+
+    text.AppendLine($"  protected override global::System.Type[] {sideWord}EnricherTypes {{ get; }} = new global::System.Type[] {{ {string.Join(", ", side.Enrichers)} }};");
+    text.AppendLine($"  protected override global::System.Type[] {sideWord}ValidatorTypes {{ get; }} = new global::System.Type[] {{ {string.Join(", ", side.Validators)} }};");
+
+    if (!HasContext(side))
+    {
+      text.AppendLine();
+      return;
+    }
+
+    var qualified = handler.Namespace is null ? contextName : $"global::{handler.Namespace}.{contextName}";
 
     var field = "_" + char.ToLowerInvariant(propertyName[0]) + propertyName.Substring(1);
     text.AppendLine($"  private {qualified}? {field};");
     text.AppendLine($"  protected {qualified} {propertyName} => {field} ??= new {qualified}({bagField});");
-    text.AppendLine($"  protected override global::System.Type[] {typesProperty}ValidatorTypes {{ get; }} = new global::System.Type[] {{ {string.Join(", ", side.Validators)} }};");
+    text.AppendLine($"  protected override global::System.Object? Create{sideWord}Context() => {propertyName};");
     text.AppendLine();
   }
 
@@ -363,7 +521,18 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
       text.AppendLine();
     }
 
-    text.AppendLine($"public sealed class {name}");
+    // витрина поставки: I{Context} из payload'ов энричеров; контекстные валидаторы
+    // ссылаются на неё как TNeeds и получают типизированный доступ к данным
+    text.AppendLine($"public interface I{name}");
+    text.AppendLine("{");
+
+    foreach (var sideMember in side.Members)
+      text.AppendLine($"  {sideMember.Member.TypeDisplay} {sideMember.Member.Name} {{ get; }}");
+
+    text.AppendLine("}");
+    text.AppendLine();
+
+    text.AppendLine($"public sealed class {name} : I{name}");
     text.AppendLine("{");
     text.AppendLine("  private readonly global::System.Collections.Generic.Dictionary<global::System.Type, object?> _bag;");
     text.AppendLine();
@@ -376,15 +545,15 @@ public sealed class EnrichmentGenerator : IIncrementalGenerator
     foreach (var sideMember in side.Members)
     {
       var member = sideMember.Member;
-      text.AppendLine($"  public {member.TypeDisplay} {member.Name} => Get({sideMember.ValidatorExpression}) is {sideMember.PayloadDisplay} p ? p.{member.Accessor} : throw Missing({sideMember.ValidatorExpression}, \"{member.Name}\");");
+      text.AppendLine($"  public {member.TypeDisplay} {member.Name} => Get({sideMember.EnricherExpression}, \"{member.Name}\") is {sideMember.PayloadDisplay} p ? p.{member.Accessor} : throw Missing({sideMember.EnricherExpression}, \"{member.Name}\");");
     }
 
     text.AppendLine();
-    text.AppendLine("  private object? Get(global::System.Type validator)");
-    text.AppendLine("    => _bag.TryGetValue(validator, out var payload) ? payload : throw Missing(validator, \"?\");");
+    text.AppendLine("  private object? Get(global::System.Type enricher, string member)");
+    text.AppendLine("    => _bag.TryGetValue(enricher, out var payload) ? payload : throw Missing(enricher, member);");
     text.AppendLine();
-    text.AppendLine("  private static global::System.Exception Missing(global::System.Type validator, string member)");
-    text.AppendLine("    => new global::System.InvalidOperationException($\"Validator '{validator}' did not provide a payload for Enrichment member '{member}'. It did not run (validation stopped before it), is not registered in DI, returned a null payload, or the generated sources are stale and need a rebuild.\");");
+    text.AppendLine("  private static global::System.Exception Missing(global::System.Type enricher, string member)");
+    text.AppendLine("    => new global::System.InvalidOperationException($\"Enricher '{enricher}' did not provide a payload for Enrichment member '{member}'. It did not run (validation stopped before it), is not registered in DI, returned a null payload, or the generated sources are stale and need a rebuild.\");");
     text.AppendLine("}");
 
     return text.ToString();

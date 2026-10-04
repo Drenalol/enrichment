@@ -6,21 +6,30 @@ using Enrichment.Example.Contracts;
 
 namespace Enrichment.Example.Handlers;
 
+[EnrichmentContext(Request = "WriteAnyRequest", Response = "WriteAnyResponse")]
 public partial class CancelOrderHandler : EnrichedHandler<CancelOrderRequest, CancelOrderResponse>
 {
-  public CancelOrderHandler(IEnumerable<IEnrichingValidator<CancelOrderRequest>> requestValidators, IEnumerable<IEnrichingValidator<CancelOrderResponse>> responseValidators) : base(requestValidators, responseValidators)
+  public CancelOrderHandler(
+    IEnumerable<IDataEnricher<CancelOrderRequest>> requestEnrichers,
+    IEnumerable<IEnrichingValidator<CancelOrderRequest>> requestValidators,
+    IEnumerable<IDataEnricher<CancelOrderResponse>> responseEnrichers,
+    IEnumerable<IEnrichingValidator<CancelOrderResponse>> responseValidators)
+    : base(requestEnrichers, requestValidators, responseEnrichers, responseValidators)
   {
   }
 
   protected override Task<CancelOrderResponse> HandleAsync(CancelOrderRequest request, CancellationToken cancellationToken)
   {
-    var refund = Enrichment.Order.PaidAmount * (100m - Enrichment.Policy.FeePercent) / 100m;
+    var order = Enrichment.Order!;
+    var policy = Enrichment.Policy!;
 
-    Console.WriteLine($"      [handler] отмена {Enrichment.Order.Id} (статус {Enrichment.Order.Status}): возврат {refund:0.##} минус комиссия политики {Enrichment.Policy.FeePercent:0.##}%");
+    var refund = order.PaidAmount * (100m - policy.FeePercent) / 100m;
+
+    Console.WriteLine($"      [handler] отмена {order.Id} (статус {order.Status}): возврат {refund:0.##} минус комиссия политики {policy.FeePercent:0.##}%");
 
     var response = new CancelOrderResponse
     {
-      OrderId = Enrichment.Order.Id,
+      OrderId = order.Id,
       RefundAmount = refund,
     };
 

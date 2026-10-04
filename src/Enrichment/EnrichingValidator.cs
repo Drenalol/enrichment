@@ -1,43 +1,34 @@
-using System.Threading;
-using System.Threading.Tasks;
+using System;
 using FluentValidation;
 
 namespace Enrichment;
 
 /// <summary>
-/// База для валидаторов с payload: правила FluentValidation объявляешь в конструкторе
-/// (<c>RuleFor(...)</c>), данные — в <see cref="EnrichAsync(TRequest, CancellationToken)"/>,
-/// который базовый мост вызывает только после успешной валидации правил.
-/// </summary>
-public abstract class EnrichingValidator<TRequest, TData> : AbstractValidator<TRequest>, IEnrichingValidator<TRequest, TData>
-{
-  /// <summary>Загрузить/вычислить payload для генерируемого Enrichment. Правила уже пройдены.</summary>
-  protected abstract ValueTask<TData> EnrichAsync(TRequest request, CancellationToken cancellationToken);
-
-  async ValueTask<object?> IEnrichingValidator<TRequest>.EnrichAsync(TRequest request, CancellationToken cancellationToken)
-  {
-    var result = await ((IValidator<TRequest>)this).ValidateAsync(request, cancellationToken).ConfigureAwait(false);
-
-    if (!result.IsValid)
-      throw new ValidationException(result.Errors);
-
-    return await EnrichAsync(request, cancellationToken).ConfigureAwait(false);
-  }
-}
-
-/// <summary>
-/// База для валидаторов-чекеров: только правила FluentValidation, payload нет —
-/// в генерируемый Enrichment не попадают, но участвуют в runtime-guard.
+/// База чистых валидаторов: только правила FluentValidation, без данных.
+/// Хендлер исполняет их до энричеров, поэтому на невалидном запросе не делается ни одного
+/// похода во «внешний мир».
 /// </summary>
 public abstract class EnrichingValidator<TRequest> : AbstractValidator<TRequest>, IEnrichingValidator<TRequest>
 {
-  async ValueTask<object?> IEnrichingValidator<TRequest>.EnrichAsync(TRequest request, CancellationToken cancellationToken)
-  {
-    var result = await ((IValidator<TRequest>)this).ValidateAsync(request, cancellationToken).ConfigureAwait(false);
+}
 
-    if (!result.IsValid)
-      throw new ValidationException(result.Errors);
-
-    return null;
-  }
+/// <summary>
+/// База контекстных валидаторов: правила, которые проверяют уже загруженные данные.
+/// Хендлер исполняет их после энричеров и кладёт типизированный Enrichment в
+/// <c>ValidationContext.RootContextData</c>; правила достают его через <see cref="GetEnrichment"/>
+/// и отказывают честным <c>ValidationFailure</c>, а не исключением загрузчика.
+/// </summary>
+public abstract class EnrichingValidator<TRequest, TNeeds> : AbstractValidator<TRequest>, IEnrichingValidator<TRequest, TNeeds>
+{
+  /// <summary>
+  /// Контекст обогащения из <c>ValidationContext.RootContextData</c>:
+  /// генерируемый Enrichment хендлера, реализующий <typeparamref name="TNeeds"/>.
+  /// </summary>
+  protected static TNeeds GetEnrichment(IValidationContext context)
+    => context.RootContextData.TryGetValue(EnrichmentContext.RootContextKey, out var value) && value is TNeeds needs
+       ? needs
+       : throw new InvalidOperationException(
+           $"The contextual validator needs the '{typeof(TNeeds).Name}' enrichment context, but it was not found in " +
+           "ValidationContext.RootContextData. The validator was used outside EnrichedHandler, " +
+           "or the generated sources are stale and need a rebuild.");
 }

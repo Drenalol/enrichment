@@ -10,7 +10,7 @@
         <!-- Генератор упаковывается как analyzers/dotnet/cs внутри пакета Enrichment, отдельным пакетом не публикуется -->
         <IsPackable>false</IsPackable>
         <PackageId>Enrichment.Generator</PackageId>
-        <Description>Source generator: генерирует плоский Enrichment хендлера из payload'ов всех IEnrichingValidator.</Description>
+        <Description>Source generator: генерирует плоский Enrichment хендлера и интерфейс-витрину I{Context} из payload'ов IDataEnricher.</Description>
     </PropertyGroup>
 
     <ItemGroup>

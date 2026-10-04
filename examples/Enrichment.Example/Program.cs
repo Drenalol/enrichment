@@ -29,11 +29,11 @@ public static class Program
         .AddSingleton<IPassengerApi>(passengers)
         .AddSingleton<INotificationApi>(notifications)
 
-        // Валидаторы собираются Scrutor-сканированием сборки — ровно теми же
-        // закрытыми IEnrichingValidator<TRequest>, что DI инжектит хендлерам.
+        // Энричеры и валидаторы собираются Scrutor-сканированием сборки — ровно теми же
+        // закрытыми IDataEnricher<TRequest>/IEnrichingValidator<TRequest>, что DI инжектит хендлерам.
         // Генератору безразлично, откуда DI берёт инъект: форму Enrichment
-        // он собирает по типам валидаторов, видимым на компиляции.
-        .AddEnrichmentValidators(typeof(Program).Assembly)
+        // он собирает по типам энричеров, видимым на компиляции.
+        .AddEnrichment(typeof(Program).Assembly)
 
         .AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof(Program).Assembly))
         .BuildServiceProvider();
@@ -41,16 +41,16 @@ public static class Program
     var sender = provider.GetRequiredService<ISender>();
 
     Console.WriteLine("Enrichment — демо");
-    Console.WriteLine("Валидаторы при проверке загружают данные из «БД/API» и кладут их в payload.");
-    Console.WriteLine("Source generator собирает из payload'ов генерируемый Enrichment,");
-    Console.WriteLine("а хендлер переиспользует эти же данные — без повторных обращений к портам.");
+    Console.WriteLine("Конвейер: чистые правила (I/O = 0) → энричеры грузят из «БД/API» →");
+    Console.WriteLine("контекстные правила проверяют на загруженном → source generator уже собрал");
+    Console.WriteLine("из payload'ов генерируемый Enrichment, и хендлер живёт на этих же данных.");
 
     Case("1. CreateOrder — запрос валиден");
     var created = await sender.Send(new CreateOrderRequest { OrderId = "ORD-100", CustomerId = "CUS-7", Currency = "RUB", Items = ["TKT-1", "SEAT-2A"] });
     Console.WriteLine($"      [ответ] {created.OrderId}: {created.Status}, итого {created.Total:0.##}");
     Counters(orders, customers, gateway, inventory, passengers, notifications);
 
-    Case("2. CreateOrder — запрос невалиден, правила гасят его до обращения в «БД»");
+    Case("2. CreateOrder — запрос невалиден, чистые правила гасят его до обращения в «БД»");
     try
     {
       await sender.Send(new CreateOrderRequest { OrderId = "ord-bad", CustomerId = "CUS-7", Currency = "RUB", Items = ["TKT-1"] });
@@ -80,7 +80,7 @@ public static class Program
 
     Counters(orders, customers, gateway, inventory, passengers, notifications);
 
-    Case("5. CancelOrder — request-валидаторы + response-валидатор");
+    Case("5. CancelOrder — request-энричеры + response-энричер");
     var cancelled = await sender.Send(new CancelOrderRequest { OrderId = "ORD-300", Reason = "клиент отказался" });
     Console.WriteLine($"      [ответ] {cancelled.OrderId}, к возврату {cancelled.RefundAmount:0.##}");
     Console.WriteLine("      [response-сторона] ResponseEnrichment.NoticeId/SentAt наполнены после хендлера (см. вызов notify API выше)");
@@ -91,22 +91,36 @@ public static class Program
     Console.WriteLine($"      [ответ] билет {ticket.TicketNumber}, место {ticket.Seat}, статус {ticket.LoyaltyTier}");
     Counters(orders, customers, gateway, inventory, passengers, notifications);
 
-    Case("7. IssueTicket — рейс без мест: валидатор падает до хендлера");
+    Case("7. IssueTicket — рейс без мест: контекстное правило отказывает до хендлера");
     try
     {
       await sender.Send(new IssueTicketRequest { OrderId = "ORD-100", FlightNumber = "SU-777", PassengerId = "PAX-2", Seat = "05B" });
     }
-    catch (InvalidOperationException e)
+    catch (ValidationException e)
     {
-      Console.WriteLine($"      [отказ валидатора] {e.Message}");
+      foreach (var failure in e.Errors)
+        Console.WriteLine($"      [отказ валидатора] {failure.ErrorMessage}");
+    }
+
+    Counters(orders, customers, gateway, inventory, passengers, notifications);
+
+    Case("8. CreateOrder — ORD-999: «не найден» — ValidationFailure правила, а не исключение загрузчика");
+    try
+    {
+      await sender.Send(new CreateOrderRequest { OrderId = "ORD-999", CustomerId = "CUS-4", Currency = "RUB", Items = ["TKT-9"] });
+    }
+    catch (ValidationException e)
+    {
+      foreach (var failure in e.Errors)
+        Console.WriteLine($"      [отказ контекстного правила] {failure.ErrorMessage}");
     }
 
     Counters(orders, customers, gateway, inventory, passengers, notifications);
 
     Console.WriteLine();
     Console.WriteLine("══ ИТОГО ══");
-    Console.WriteLine("В «БД/API» ходили только валидаторы (счётчики выше).");
-    Console.WriteLine("Хендлеры не получают порты в конструкторах — их данные лежат в Enrichment.");
+    Console.WriteLine("В «БД/API» ходили только энричеры (счётчики выше), валидаторы и хендлеры — только по данным из Enrichment.");
+    Console.WriteLine("Хендлеры не получают порты в конструкторах; data-проверки — ValidationFailure, а не throw из загрузчика.");
   }
 
   private static void Case(string title)

@@ -13,16 +13,33 @@ internal sealed record HandlerInfo(
   string Accessibility,
   ImmutableArray<OuterType> OuterTypes,
   string RequestKey,
-  string ResponseKey
+  string ResponseKey,
+  string? RequestContextName,
+  string? ResponseContextName
 );
 
-// Одна запись = одна пара (валидатор, TReq). None-валидатор: PayloadDisplay == null, Members пуст.
-internal sealed record ValidatorInfo(
-  string ValidatorTypeFq,
+// Единый скан сборки: payload'-энричеры и валидаторы (контекстные помечены Contextual).
+internal sealed record ScanResult(
+  ImmutableArray<EnricherInfo> Enrichers,
+  ImmutableArray<ValidatorInfo> Validators
+);
+
+// Одна запись = одна пара (энричер, TReq). payload не развёрнут: PayloadDisplay == null, Members пуст.
+internal sealed record EnricherInfo(
+  string EnricherTypeFq,
   string RequestKey,
   bool IsAccessible,
   string? PayloadDisplay,
   ImmutableArray<FlatMember> Members,
+  ImmutableArray<ValidatorDiagnostic> Diagnostics
+);
+
+// Одна запись = одна пара (валидатор, TReq). Contextual — исполняется после энричеров.
+internal sealed record ValidatorInfo(
+  string ValidatorTypeFq,
+  string RequestKey,
+  bool IsAccessible,
+  bool Contextual,
   ImmutableArray<ValidatorDiagnostic> Diagnostics
 );
 

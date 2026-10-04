@@ -5,13 +5,13 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <PackageId>Enrichment</PackageId>
-    <Description>Data loaded by FluentValidation validators during validation is reused by MediatR handlers through a generated strongly-typed Enrichment context. Ships the runtime contracts and the Roslyn source generator in one package.</Description>
+    <Description>Data enrichers load is reused by FluentValidation contextual validators and MediatR handlers through a generated strongly-typed Enrichment context. Ships the runtime contracts and the Roslyn source generator in one package.</Description>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="FluentValidation" Version="12.1.1" />
     <PackageReference Include="MediatR" Version="12.4.1" />
-    <!-- AddEnrichmentValidators: assembly-scanning регистрация валидаторов -->
+    <!-- AddEnrichment: assembly-scanning регистрация энричеров и валидаторов -->
     <PackageReference Include="Scrutor" Version="6.1.0" />
   </ItemGroup>
 

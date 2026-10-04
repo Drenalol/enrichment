@@ -7,22 +7,31 @@ using Enrichment.Example.Contracts;
 namespace Enrichment.Example.Handlers;
 
 /// <summary>
-/// Хендлер не получает порты в конструктор — весь «внешний мир» остался валидаторам.
-/// Данные, загруженные ими при проверке, лежат в генерируемом Enrichment.
+/// Хендлер не получает порты в конструктор — весь «внешний мир» остался энричерам.
+/// Данные, загруженные ими, лежат в генерируемом Enrichment; контекстные валидаторы
+/// уже проверили, что заказ и клиент найдены, поэтому «!» здесь безопасно.
 /// </summary>
 public partial class CreateOrderHandler : EnrichedHandler<CreateOrderRequest, CreateOrderResponse>
 {
-  public CreateOrderHandler(IEnumerable<IEnrichingValidator<CreateOrderRequest>> requestValidators, IEnumerable<IEnrichingValidator<CreateOrderResponse>> responseValidators) : base(requestValidators, responseValidators)
+  public CreateOrderHandler(
+    IEnumerable<IDataEnricher<CreateOrderRequest>> requestEnrichers,
+    IEnumerable<IEnrichingValidator<CreateOrderRequest>> requestValidators,
+    IEnumerable<IDataEnricher<CreateOrderResponse>> responseEnrichers,
+    IEnumerable<IEnrichingValidator<CreateOrderResponse>> responseValidators)
+    : base(requestEnrichers, requestValidators, responseEnrichers, responseValidators)
   {
   }
 
   protected override Task<CreateOrderResponse> HandleAsync(CreateOrderRequest request, CancellationToken cancellationToken)
   {
-    Console.WriteLine($"      [handler] собираю подтверждение из Enrichment: заказ {Enrichment.Order.Id}, клиент {Enrichment.Customer.Email} (VIP: {Enrichment.IsVip}), сумма {Enrichment.ItemsTotal:0.##}");
+    var order = Enrichment.Order!;
+    var customer = Enrichment.Customer!;
+
+    Console.WriteLine($"      [handler] собираю подтверждение из Enrichment: заказ {order.Id}, клиент {customer.Email} (VIP: {Enrichment.IsVip}), сумма {Enrichment.ItemsTotal:0.##}");
 
     var response = new CreateOrderResponse
     {
-      OrderId = Enrichment.Order.Id,
+      OrderId = order.Id,
       Status = Enrichment.IsVip ? "ConfirmedPriority" : "Confirmed",
       Total = Enrichment.ItemsTotal,
     };

@@ -42,6 +42,12 @@ public class EnrichmentGeneratorTests
     }
     """;
 
+  private const string HandlerCtor = """
+      public RequestOneHandler(IEnumerable<IDataEnricher<RequestOne>> requestEnrichers, IEnumerable<IEnrichingValidator<RequestOne>> requestValidators, IEnumerable<IDataEnricher<ResponseOne>> responseEnrichers, IEnumerable<IEnrichingValidator<ResponseOne>> responseValidators) : base(requestEnrichers, requestValidators, responseEnrichers, responseValidators)
+      {
+      }
+    """;
+
   private static CSharpMetadata ReferenceOf(string source, string assemblyName)
   {
     var compilation = CSharpCompilation.Create(
@@ -70,6 +76,7 @@ public class EnrichmentGeneratorTests
           .Where(static path => path.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
           .Select(static path => (MetadataReference)MetadataReference.CreateFromFile(path)),
       MetadataReference.CreateFromFile(typeof(IEnrichingValidator<>).Assembly.Location),
+      MetadataReference.CreateFromFile(typeof(IDataEnricher<>).Assembly.Location),
       MetadataReference.CreateFromFile(typeof(FluentValidation.AbstractValidator<>).Assembly.Location),
       MetadataReference.CreateFromFile(typeof(MediatR.IRequestHandler<,>).Assembly.Location),
       MetadataReference.CreateFromFile(typeof(MediatR.IRequest).Assembly.Location),
@@ -113,18 +120,13 @@ public class EnrichmentGeneratorTests
   }
 
   [Fact]
-  public void NamedTuplePayload_FlattensToTypedMembers_AndKeepsNoneValidatorInGuard()
+  public void NamedTuplePayload_FlattensToTypedMembers_AndKeepsPureValidatorInGuard()
   {
     var source = Model + """
 
-      public class OrderValidator : EnrichingValidator<RequestOne, (Order Order, IDictionary<string, IOrderType> OrdersToPay)>
+      public class OrderEnricher : Enricher<RequestOne, (Order Order, IDictionary<string, IOrderType> OrdersToPay)>
       {
-          public OrderValidator()
-          {
-              RuleFor(x => x.OrderId).NotEmpty();
-          }
-
-          protected override ValueTask<(Order Order, IDictionary<string, IOrderType> OrdersToPay)> EnrichAsync(RequestOne request, CancellationToken cancellationToken)
+          protected override ValueTask<(Order Order, IDictionary<string, IOrderType> OrdersToPay)> LoadAsync(RequestOne request, CancellationToken cancellationToken)
               => throw new System.NotImplementedException();
       }
 
@@ -138,9 +140,7 @@ public class EnrichmentGeneratorTests
 
       public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
       {
-          public RequestOneHandler(IEnumerable<IEnrichingValidator<RequestOne>> requestValidators, IEnumerable<IEnrichingValidator<ResponseOne>> responseValidators) : base(requestValidators, responseValidators)
-          {
-          }
+      """ + HandlerCtor + """
 
           protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
           {
@@ -160,9 +160,17 @@ public class EnrichmentGeneratorTests
     Assert.Contains("public global::Order Order =>", context);
     Assert.Contains("public global::System.Collections.Generic.IDictionary<string, global::IOrderType> OrdersToPay =>", context);
 
+    // имя члена проброшено в Get: и payload-less, и null-payload провалы называют член по имени
+    Assert.Contains("Get(typeof(global::OrderEnricher), \"Order\")", context);
+    Assert.Contains("private object? Get(global::System.Type enricher, string member)", context);
+    Assert.DoesNotContain("\"?\"", context);
+
     var handler = files["RequestOneHandler.Handler.g.cs"];
-    Assert.Contains("typeof(global::OrderValidator)", handler);
+    Assert.Contains("typeof(global::OrderEnricher)", handler);
     Assert.Contains("typeof(global::NameValidator)", handler);
+
+    // чистый валидатор — только в guard-массиве валидаторов, не энричеров
+    Assert.Contains("RequestEnricherTypes { get; } = new global::System.Type[] { typeof(global::OrderEnricher) };", handler);
   }
 
   [Fact]
@@ -170,17 +178,15 @@ public class EnrichmentGeneratorTests
   {
     var source = Model + """
 
-      public class OrderValidator : EnrichingValidator<RequestOne, (Order, IDictionary<string, IOrderType>)>
+      public class OrderEnricher : Enricher<RequestOne, (Order, IDictionary<string, IOrderType>)>
       {
-          protected override ValueTask<(Order, IDictionary<string, IOrderType>)> EnrichAsync(RequestOne request, CancellationToken cancellationToken)
+          protected override ValueTask<(Order, IDictionary<string, IOrderType>)> LoadAsync(RequestOne request, CancellationToken cancellationToken)
               => throw new System.NotImplementedException();
       }
 
       public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
       {
-          public RequestOneHandler(IEnumerable<IEnrichingValidator<RequestOne>> requestValidators, IEnumerable<IEnrichingValidator<ResponseOne>> responseValidators) : base(requestValidators, responseValidators)
-          {
-          }
+      """ + HandlerCtor + """
 
           protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
           {
@@ -197,7 +203,7 @@ public class EnrichmentGeneratorTests
   }
 
   [Fact]
-  public void NoneValidator_IsExcludedFromContextMembers_ButTrackedInGuard()
+  public void PureValidator_WithoutEnrichers_TrackedInGuard_AndNoContextClass()
   {
     var source = Model + """
 
@@ -211,9 +217,7 @@ public class EnrichmentGeneratorTests
 
       public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
       {
-          public RequestOneHandler(IEnumerable<IEnrichingValidator<RequestOne>> requestValidators, IEnumerable<IEnrichingValidator<ResponseOne>> responseValidators) : base(requestValidators, responseValidators)
-          {
-          }
+      """ + HandlerCtor + """
 
           protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
               => Task.FromResult(new ResponseOne());
@@ -224,10 +228,11 @@ public class EnrichmentGeneratorTests
 
     Assert.Empty(errors);
 
-    var context = files["RequestOneHandler.RequestOneEnrichment.g.cs"];
-    Assert.DoesNotContain("=> Get(", context);
+    Assert.False(files.ContainsKey("RequestOneHandler.RequestOneEnrichment.g.cs"));
 
-    Assert.Contains("typeof(global::NameValidator)", files["RequestOneHandler.Handler.g.cs"]);
+    var handler = files["RequestOneHandler.Handler.g.cs"];
+    Assert.Contains("typeof(global::NameValidator)", handler);
+    Assert.DoesNotContain("CreateRequestContext", handler);
   }
 
   [Fact]
@@ -235,23 +240,21 @@ public class EnrichmentGeneratorTests
   {
     var source = Model + """
 
-      public class FirstValidator : EnrichingValidator<RequestOne, (Order Foo, int IgnoredOne)>
+      public class FirstEnricher : Enricher<RequestOne, (Order Foo, int IgnoredOne)>
       {
-          protected override ValueTask<(Order, int)> EnrichAsync(RequestOne request, CancellationToken cancellationToken)
+          protected override ValueTask<(Order, int)> LoadAsync(RequestOne request, CancellationToken cancellationToken)
               => throw new System.NotImplementedException();
       }
 
-      public class SecondValidator : EnrichingValidator<RequestOne, (string Foo, int IgnoredTwo)>
+      public class SecondEnricher : Enricher<RequestOne, (string Foo, int IgnoredTwo)>
       {
-          protected override ValueTask<(string, int)> EnrichAsync(RequestOne request, CancellationToken cancellationToken)
+          protected override ValueTask<(string, int)> LoadAsync(RequestOne request, CancellationToken cancellationToken)
               => throw new System.NotImplementedException();
       }
 
       public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
       {
-          public RequestOneHandler(IEnumerable<IEnrichingValidator<RequestOne>> requestValidators, IEnumerable<IEnrichingValidator<ResponseOne>> responseValidators) : base(requestValidators, responseValidators)
-          {
-          }
+      """ + HandlerCtor + """
 
           protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
               => Task.FromResult(new ResponseOne());
@@ -275,17 +278,15 @@ public class EnrichmentGeneratorTests
   {
     var source = Model + """
 
-      public class StringPayloadValidator : EnrichingValidator<RequestOne, string>
+      public class StringPayloadEnricher : Enricher<RequestOne, string>
       {
-          protected override ValueTask<string> EnrichAsync(RequestOne request, CancellationToken cancellationToken)
+          protected override ValueTask<string> LoadAsync(RequestOne request, CancellationToken cancellationToken)
               => throw new System.NotImplementedException();
       }
 
       public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
       {
-          public RequestOneHandler(IEnumerable<IEnrichingValidator<RequestOne>> requestValidators, IEnumerable<IEnrichingValidator<ResponseOne>> responseValidators) : base(requestValidators, responseValidators)
-          {
-          }
+      """ + HandlerCtor + """
 
           protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
               => Task.FromResult(new ResponseOne());
@@ -303,17 +304,15 @@ public class EnrichmentGeneratorTests
   {
     var source = Model + """
 
-      public class OrderValidator : EnrichingValidator<RequestOne, (Order Order, int Count)>
+      public class OrderEnricher : Enricher<RequestOne, (Order Order, int Count)>
       {
-          protected override ValueTask<(Order, int)> EnrichAsync(RequestOne request, CancellationToken cancellationToken)
+          protected override ValueTask<(Order, int)> LoadAsync(RequestOne request, CancellationToken cancellationToken)
               => throw new System.NotImplementedException();
       }
 
       public class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
       {
-          public RequestOneHandler(IEnumerable<IEnrichingValidator<RequestOne>> requestValidators, IEnumerable<IEnrichingValidator<ResponseOne>> responseValidators) : base(requestValidators, responseValidators)
-          {
-          }
+      """ + HandlerCtor + """
 
           protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
               => Task.FromResult(new ResponseOne());
@@ -326,9 +325,9 @@ public class EnrichmentGeneratorTests
   }
 
   [Fact]
-  public void ValidatorFromReferencedAssembly_IsDiscoveredAndTyped()
+  public void EnricherFromReferencedAssembly_IsDiscoveredAndTyped()
   {
-    var validatorSource = """
+    var enricherSource = """
       using Enrichment;
       using System.Collections.Generic;
       using System.Threading;
@@ -347,22 +346,20 @@ public class EnrichmentGeneratorTests
       {
       }
 
-      public class ReferenceOrderValidator : EnrichingValidator<RequestOne, (Order Order, IDictionary<string, IOrderType> OrdersToPay)>
+      public class ReferenceOrderEnricher : Enricher<RequestOne, (Order Order, IDictionary<string, IOrderType> OrdersToPay)>
       {
-          protected override ValueTask<(Order Order, IDictionary<string, IOrderType> OrdersToPay)> EnrichAsync(RequestOne request, CancellationToken cancellationToken)
+          protected override ValueTask<(Order Order, IDictionary<string, IOrderType> OrdersToPay)> LoadAsync(RequestOne request, CancellationToken cancellationToken)
               => throw new System.NotImplementedException();
       }
       """;
 
-    var reference = ReferenceOf(validatorSource, "Validators");
+    var reference = ReferenceOf(enricherSource, "Enrichers");
 
     var source = Model + """
 
       public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
       {
-          public RequestOneHandler(IEnumerable<IEnrichingValidator<RequestOne>> requestValidators, IEnumerable<IEnrichingValidator<ResponseOne>> responseValidators) : base(requestValidators, responseValidators)
-          {
-          }
+      """ + HandlerCtor + """
 
           protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
           {
@@ -375,7 +372,7 @@ public class EnrichmentGeneratorTests
     var (_, errors, files) = Run(source, reference.Reference);
 
     Assert.Empty(errors);
-    Assert.Contains("typeof(global::ReferenceOrderValidator)", files["RequestOneHandler.Handler.g.cs"]);
+    Assert.Contains("typeof(global::ReferenceOrderEnricher)", files["RequestOneHandler.Handler.g.cs"]);
     Assert.Contains("public global::Order Order =>", files["RequestOneHandler.RequestOneEnrichment.g.cs"]);
   }
 
@@ -384,17 +381,15 @@ public class EnrichmentGeneratorTests
   {
     var source = "#nullable enable\n" + Model + """
 
-      public class NullablePayloadValidator : EnrichingValidator<RequestOne, (Order? Order, decimal? Optional, string Required)>
+      public class NullablePayloadEnricher : Enricher<RequestOne, (Order? Order, decimal? Optional, string Required)>
       {
-          protected override ValueTask<(Order?, decimal?, string)> EnrichAsync(RequestOne request, CancellationToken cancellationToken)
+          protected override ValueTask<(Order?, decimal?, string)> LoadAsync(RequestOne request, CancellationToken cancellationToken)
               => throw new System.NotImplementedException();
       }
 
       public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
       {
-          public RequestOneHandler(IEnumerable<IEnrichingValidator<RequestOne>> requestValidators, IEnumerable<IEnrichingValidator<ResponseOne>> responseValidators) : base(requestValidators, responseValidators)
-          {
-          }
+      """ + HandlerCtor + """
 
           protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
           {
@@ -424,20 +419,159 @@ public class EnrichmentGeneratorTests
   }
 
   [Fact]
-  public void ResponseValidators_GetSeparateResponseEnrichment()
+  public void ContextualValidator_AutoUnionInterface_EmittedFromPayloads_AndValidatorTrackedInGuard()
   {
-    var source = Model + """
+    var source = "#nullable enable\n" + Model + """
 
-      public class ResponsePayloadValidator : EnrichingValidator<ResponseOne, (ResponseOne Response, string Note)>
+      public class OrderEnricher : Enricher<RequestOne, (Order? Order, IDictionary<string, IOrderType> OrdersToPay)>
       {
-          protected override ValueTask<(ResponseOne, string)> EnrichAsync(ResponseOne response, CancellationToken cancellationToken)
+          protected override ValueTask<(Order?, IDictionary<string, IOrderType>)> LoadAsync(RequestOne request, CancellationToken cancellationToken)
               => throw new System.NotImplementedException();
       }
 
-      public class EchoValidator : EnrichingValidator<ResponseOne, ResponseOne>
+      public class OrderExistsValidator : EnrichingValidator<RequestOne, IRequestOneEnrichment>
       {
-          protected override ValueTask<ResponseOne> EnrichAsync(ResponseOne response, CancellationToken cancellationToken)
+          public OrderExistsValidator()
+          {
+              RuleFor(x => x.OrderId).Custom((orderId, context) =>
+              {
+                  if (GetEnrichment(context).Order is null)
+                      context.AddFailure("order not found");
+              });
+          }
+      }
+
+      public class NameValidator : EnrichingValidator<RequestOne>
+      {
+          public NameValidator()
+          {
+              RuleFor(x => x.Title).NotEmpty();
+          }
+      }
+
+      public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
+      {
+      """ + HandlerCtor + """
+
+          protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
+          {
+              var order = Enrichment.Order;
+              return Task.FromResult(new ResponseOne());
+          }
+      }
+      """;
+
+    var (generator, errors, files) = Run(source);
+
+    Assert.Empty(errors);
+    Assert.Empty(generator.Where(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+
+    var context = files["RequestOneHandler.RequestOneEnrichment.g.cs"];
+
+    // витрина I{Context} собрана из payload'ов энричеров, класс её реализует
+    Assert.Contains("public interface IRequestOneEnrichment", context);
+    Assert.Contains("global::Order? Order { get; }", context);
+    Assert.Contains("global::System.Collections.Generic.IDictionary<string, global::IOrderType> OrdersToPay { get; }", context);
+    Assert.Contains("public sealed class RequestOneEnrichment : IRequestOneEnrichment", context);
+
+    var handler = files["RequestOneHandler.Handler.g.cs"];
+    Assert.Contains("typeof(global::OrderExistsValidator)", handler);
+    Assert.Contains("typeof(global::NameValidator)", handler);
+    Assert.Contains("RequestEnricherTypes { get; } = new global::System.Type[] { typeof(global::OrderEnricher) };", handler);
+    Assert.Contains("CreateRequestContext() => Enrichment;", handler);
+  }
+
+  [Fact]
+  public void HandWrittenNeedsInterface_ReportsENR006()
+  {
+    var source = Model + """
+
+      public interface IOrderAware
+      {
+          Order Order { get; }
+      }
+
+      public class OrderEnricher : Enricher<RequestOne, (Order Order, int Count)>
+      {
+          protected override ValueTask<(Order, int)> LoadAsync(RequestOne request, CancellationToken cancellationToken)
               => throw new System.NotImplementedException();
+      }
+
+      public class OrderExistsValidator : EnrichingValidator<RequestOne, IOrderAware>
+      {
+          public OrderExistsValidator()
+          {
+              RuleFor(x => x.Title).NotEmpty();
+          }
+      }
+
+      public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
+      {
+      """ + HandlerCtor + """
+
+          protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
+          {
+              var order = Enrichment.Order;
+              return Task.FromResult(new ResponseOne());
+          }
+      }
+      """;
+
+    var (generator, errors, _) = Run(source);
+
+    Assert.Empty(errors);
+    Assert.Contains(generator, static diagnostic => diagnostic.Id == "ENR006");
+  }
+
+  [Fact]
+  public void ContextualValidator_NonInterfaceNeeds_ReportsENR006()
+  {
+    var source = Model + """
+
+      public class OrderAwareValidator : EnrichingValidator<RequestOne, Order>
+      {
+          public OrderAwareValidator()
+          {
+              RuleFor(x => x.Title).NotEmpty();
+          }
+      }
+
+      public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
+      {
+      """ + HandlerCtor + """
+
+          protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
+              => Task.FromResult(new ResponseOne());
+      }
+      """;
+
+    var (generator, errors, _) = Run(source);
+
+    Assert.Empty(errors);
+    Assert.Contains(generator, static diagnostic => diagnostic.Id == "ENR006");
+  }
+
+  [Fact]
+  public void ResponseSide_EnrichersAndContextualValidator_GetResponseEnrichment()
+  {
+    var source = Model + """
+
+      public class ResponsePayloadEnricher : Enricher<ResponseOne, (ResponseOne Response, string Note)>
+      {
+          protected override ValueTask<(ResponseOne, string)> LoadAsync(ResponseOne response, CancellationToken cancellationToken)
+              => throw new System.NotImplementedException();
+      }
+
+      public class NoteValidator : EnrichingValidator<ResponseOne, IRequestOneResponseEnrichment>
+      {
+          public NoteValidator()
+          {
+              RuleFor(x => x.Echo).Custom((echo, context) =>
+              {
+                  if (string.IsNullOrEmpty(GetEnrichment(context).Note))
+                      context.AddFailure("note missing");
+              });
+          }
       }
 
       public class NoneResponseValidator : EnrichingValidator<ResponseOne>
@@ -450,14 +584,12 @@ public class EnrichmentGeneratorTests
 
       public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
       {
-          public RequestOneHandler(IEnumerable<IEnrichingValidator<RequestOne>> requestValidators, IEnumerable<IEnrichingValidator<ResponseOne>> responseValidators) : base(requestValidators, responseValidators)
-          {
-          }
+      """ + HandlerCtor + """
 
           protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
           {
               var note = ResponseEnrichment.Note;
-              var echo = ResponseEnrichment.Echo;
+              var echo = ResponseEnrichment.Response;
               return Task.FromResult(new ResponseOne());
           }
       }
@@ -469,12 +601,138 @@ public class EnrichmentGeneratorTests
     Assert.Empty(generator.Where(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
 
     var responseContext = files["RequestOneHandler.RequestOneResponseEnrichment.g.cs"];
+    Assert.Contains("public interface IRequestOneResponseEnrichment", responseContext);
+    Assert.Contains("string Note { get; }", responseContext);
+    Assert.Contains("public sealed class RequestOneResponseEnrichment : IRequestOneResponseEnrichment", responseContext);
     Assert.Contains("public global::ResponseOne Response =>", responseContext);
     Assert.Contains("public string Note =>", responseContext);
-    Assert.Contains("public string Echo =>", responseContext);
 
     var handler = files["RequestOneHandler.Handler.g.cs"];
     Assert.Contains("ResponseEnrichment", handler);
     Assert.Contains("typeof(global::NoneResponseValidator)", handler);
+    Assert.Contains("typeof(global::NoteValidator)", handler);
+    Assert.Contains("CreateResponseContext() => ResponseEnrichment;", handler);
+  }
+
+  [Fact]
+  public void PayloadlessEnricher_ImplementsBaseInterface_OnlyTrackedInGuard()
+  {
+    var source = Model + """
+
+      public class RawEnricher : IDataEnricher<RequestOne>
+      {
+          public ValueTask<object?> EnrichAsync(RequestOne request, CancellationToken cancellationToken)
+              => ValueTask.FromResult<object?>(null);
+      }
+
+      public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
+      {
+      """ + HandlerCtor + """
+
+          protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
+              => Task.FromResult(new ResponseOne());
+      }
+      """;
+
+    var (_, errors, files) = Run(source);
+
+    Assert.Empty(errors);
+
+    Assert.False(files.ContainsKey("RequestOneHandler.RequestOneEnrichment.g.cs"));
+
+    var handler = files["RequestOneHandler.Handler.g.cs"];
+    Assert.Contains("RequestEnricherTypes { get; } = new global::System.Type[] { typeof(global::RawEnricher) };", handler);
+  }
+
+  [Fact]
+  public void ContextNameOverride_Attribute_RenamesContextClassAndInterface()
+  {
+    var source = Model + """
+
+      public class OrderEnricher : Enricher<RequestOne, (Order Order, int Count)>
+      {
+          protected override ValueTask<(Order, int)> LoadAsync(RequestOne request, CancellationToken cancellationToken)
+              => throw new System.NotImplementedException();
+      }
+
+      public class OrderExistsValidator : EnrichingValidator<RequestOne, ISalesContext>
+      {
+          public OrderExistsValidator()
+          {
+              RuleFor(x => x.OrderId).Custom((orderId, context) =>
+              {
+                  if (GetEnrichment(context).Order is null)
+                      context.AddFailure("order not found");
+              });
+          }
+      }
+
+      [EnrichmentContext(Request = "SalesContext")]
+      public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
+      {
+      """ + HandlerCtor + """
+
+          protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
+          {
+              var order = Enrichment.Order;
+              return Task.FromResult(new ResponseOne());
+          }
+      }
+      """;
+
+    var (generator, errors, files) = Run(source);
+
+    Assert.Empty(errors);
+    Assert.Empty(generator.Where(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+
+    Assert.False(files.ContainsKey("RequestOneHandler.RequestOneEnrichment.g.cs"));
+
+    var context = files["RequestOneHandler.SalesContext.g.cs"];
+    Assert.Contains("public interface ISalesContext", context);
+    Assert.Contains("Order Order { get; }", context);
+    Assert.Contains("public sealed class SalesContext : ISalesContext", context);
+
+    var handler = files["RequestOneHandler.Handler.g.cs"];
+    Assert.Contains("protected SalesContext Enrichment => _enrichment ??= new SalesContext(RequestBag);", handler);
+    Assert.Contains("CreateRequestContext() => Enrichment;", handler);
+    Assert.Contains("typeof(global::OrderExistsValidator)", handler);
+  }
+
+  [Fact]
+  public void ContextNameOverride_Collides_ReportsENR007()
+  {
+    var source = Model + """
+
+      public class RequestOneEnricher : Enricher<RequestOne, (Order Order, int Count)>
+      {
+          protected override ValueTask<(Order, int)> LoadAsync(RequestOne request, CancellationToken cancellationToken)
+              => throw new System.NotImplementedException();
+      }
+
+      public class ResponseEnricher : Enricher<ResponseOne, (string Note, int Ignored)>
+      {
+          protected override ValueTask<(string, int)> LoadAsync(ResponseOne response, CancellationToken cancellationToken)
+              => throw new System.NotImplementedException();
+      }
+
+      [EnrichmentContext(Request = "Shared", Response = "Shared")]
+      public partial class RequestOneHandler : EnrichedHandler<RequestOne, ResponseOne>
+      {
+      """ + HandlerCtor + """
+
+          protected override Task<ResponseOne> HandleAsync(RequestOne request, CancellationToken cancellationToken)
+          {
+              var order = Enrichment.Order;
+              return Task.FromResult(new ResponseOne());
+          }
+      }
+      """;
+
+    var (generator, _, files) = Run(source);
+
+    Assert.Contains(generator, static diagnostic => diagnostic.Id == "ENR007");
+
+    // имя взято один раз: второй борт не переизменяет файл
+    Assert.True(files.ContainsKey("RequestOneHandler.Shared.g.cs"));
   }
 }

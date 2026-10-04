@@ -7,7 +7,7 @@ using Enrichment.Example.Ports;
 namespace Enrichment.Example.Infrastructure;
 
 // Имитации «внешних ресурсов» со счётчиками вызовов: демо на их примере показывает,
-// что в «БД/API» ходит только валидатор, а хендлер живёт на данных из Enrichment.
+// что в «БД/API» ходят только энричеры, а валидаторы и хендлер живут на данных из Enrichment.
 
 public sealed class FakeOrderRepository : IOrderRepository
 {
