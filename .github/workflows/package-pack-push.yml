@@ -4,6 +4,13 @@ on:
   push:
     branches: [ main ]
 
+permissions:
+  contents: read
+  packages: write
+
+env:
+  NUGET_AUTH_TOKEN: ${{ secrets.NUGET_AUTH_TOKEN }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -16,7 +23,14 @@ jobs:
         dotnet-version: 10.0.x
     - name: Pack
       run: dotnet pack --configuration Release -o "./packages" src/Enrichment
+    - name: Publish to GitHub Packages
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        dotnet nuget add source --username "$GITHUB_ACTOR" --password "$GITHUB_TOKEN" --store-password-in-clear-text --name github "https://nuget.pkg.github.com/Drenalol/index.json"
+        dotnet nuget push "./packages/*.nupkg" --source github --skip-duplicate
     - name: Publish NuGet
+      if: env.NUGET_AUTH_TOKEN != ''
       env:
         NUGET_AUTH_TOKEN: ${{secrets.NUGET_AUTH_TOKEN}}
       run: dotnet nuget push -s https://www.nuget.org/api/v2/package -k $NUGET_AUTH_TOKEN ./packages/*.nupkg --skip-duplicate
